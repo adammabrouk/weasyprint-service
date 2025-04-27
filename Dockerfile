@@ -1,8 +1,23 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 # Set the working directory in the container
 WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libpq-dev curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the pyproject.toml and poetry.lock files to the container
 COPY pyproject.toml poetry.lock ./
@@ -11,7 +26,10 @@ COPY pyproject.toml poetry.lock ./
 RUN pip install poetry
 
 # Install dependencies
-RUN poetry install --no-root
+
+RUN poetry config virtualenvs.create false && \
+    poetry config cache-dir /tmp/cache && \
+    poetry install --no-root
 
 # Copy the rest of the application code to the container
 COPY . .
