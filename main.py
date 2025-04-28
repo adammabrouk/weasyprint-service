@@ -7,6 +7,10 @@ import requests
 from celery import Celery
 from celery.result import AsyncResult
 from typing import List, Dict
+import base64
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.oauth2.credentials import Credentials
 
 app = FastAPI()
 
@@ -25,11 +29,15 @@ class ClientData(BaseModel):
     branding_color: str
 
 
+class HTMLPage(BaseModel):
+    page_id: int
+    encoded_page_html: str
+
+
 class GeneratePDFRequest(BaseModel):
-    html_urls: List[HttpUrl]
-    drive_link: HttpUrl
-    auth_token: str
-    static_assets: Dict[str, HttpUrl]
+    drive_token: str
+    destination_folder_id: str
+    html_pages: List[HTMLPage]
 
 
 # Load Jinja2 templates
@@ -39,37 +47,14 @@ template_env = Environment(loader=template_loader)
 
 @app.post("/generate-pdf")
 async def generate_pdf(request: GeneratePDFRequest, background_tasks: BackgroundTasks):
-    # Fetch HTML files
-    html_contents = []
-    headers = {"Authorization": f"Bearer {request.auth_token}"}
-    for url in request.html_urls:
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Invalid HTML URL: {url}")
-        html_contents.append(response.text)
-
-    # Fetch static assets
-    static_assets = {}
-    for asset_name, asset_url in request.static_assets.items():
-        response = requests.get(asset_url, headers=headers)
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid asset URL: {asset_url}"
-            )
-        asset_path = f"./temp/{asset_name}"
-        with open(asset_path, "wb") as asset_file:
-            asset_file.write(response.content)
-        static_assets[asset_name] = asset_path
-
-    # Render the HTML templates with client data
-    rendered_htmls = []
-    for html_content in html_contents:
-        template = template_env.from_string(html_content)
-        rendered_html = template.render(static_assets=static_assets)
-        rendered_htmls.append(rendered_html)
+    # Decode base64 encoded HTML
+    decoded_htmls = []
+    for page in request.html_pages:
+        decoded_html = base64.b64decode(page.encoded_page_html).decode('utf-8')
+        decoded_htmls.append(decoded_html)
 
     # Generate PDF asynchronously
-    task = generate_pdf_task.delay(rendered_htmls)
+    task = generate_pdf_task.delay(decoded_htmls, request.drive_token, request.destination_folder_id)
     return {"task_id": task.id}
 
 
@@ -79,18 +64,28 @@ async def pdf_status(task_id: str):
     if task_result.state == "PENDING":
         return {"status": "Pending"}
     elif task_result.state == "SUCCESS":
-        return {"status": "Success", "pdf_url": task_result.result}
+        return {"status": "Success", "file_id": task_result.result}
     else:
         return {"status": "Failed"}
 
 
 @celery.task
-def generate_pdf_task(rendered_htmls: List[str]):
+def generate_pdf_task(decoded_htmls: List[str], drive_token: str, destination_folder_id: str):
     pdf_path = "./temp/generated_pdf.pdf"
-    combined_html = "".join(rendered_htmls)
+    combined_html = "".join(decoded_htmls)
     HTML(string=combined_html).write_pdf(pdf_path)
-    # Here you can add code to upload the PDF to cloud storage and return the URL
-    return pdf_path
+
+    # Upload the PDF to Google Drive
+    credentials = Credentials(token=drive_token)
+    service = build('drive', 'v3', credentials=credentials)
+    file_metadata = {
+        'name': 'generated_pdf.pdf',
+        'parents': [destination_folder_id]
+    }
+    media = MediaFileUpload(pdf_path, mimetype='application/pdf')
+    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+    return file.get('id')
 
 
 @app.get("/mcp-endpoint")
